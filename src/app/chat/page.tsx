@@ -8,15 +8,16 @@ const SOCKET_URL =
     ? "https://campus-vibe.onrender.com"
     : undefined;
 const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
   {
-    urls: [
-      'turn:global.relay.metered.ca:80',
-      'turn:global.relay.metered.ca:443?transport=tcp',
-      'turn:global.relay.metered.ca:443'
-    ],
-    username: '361ef98c73720cd9402bec21',
-    credential: 'J1BO0ByqgejBYqr8'
+    urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+    username: 'test',
+    credential: 'test'
+  },
+  {
+    urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
+    username: 'test',
+    credential: 'test'
   }
 ];
 
