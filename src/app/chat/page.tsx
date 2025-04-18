@@ -15,8 +15,8 @@ const ICE_SERVERS = [
       'turn:global.relay.metered.ca:443?transport=tcp',
       'turn:global.relay.metered.ca:443'
     ],
-    username: '5cad527989b7bc19f37ce7d7', // Metered.ca demo (expires in 24h!)
-    credential: '4hflUOIwTUBTas68'
+    username: '361ef98c73720cd9402bec21',
+    credential: 'J1BO0ByqgejBYqr8'
   }
 ];
 
