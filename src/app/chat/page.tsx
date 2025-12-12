@@ -45,6 +45,7 @@ export default function ChatRoom() {
 
   // WebRTC peer connection
   const peerRef = useRef<RTCPeerConnection|null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
 
   // Camera/mic: prompt immediately
   useEffect(() => {
@@ -84,12 +85,26 @@ export default function ChatRoom() {
 
   // Ensure remote video plays when stream is available
   useEffect(() => {
-    if (remoteVideoRef.current && remoteConnected && status === 'chatting') {
+    if (remoteVideoRef.current && remoteStreamRef.current && status === 'chatting') {
       const video = remoteVideoRef.current;
-      if (video.srcObject && video.paused) {
-        video.play().catch((err) => {
-          console.error('Error playing remote video in useEffect:', err);
-        });
+      const stream = remoteStreamRef.current;
+      
+      // Check if stream has video tracks
+      const hasVideoTrack = stream.getTracks().some(t => t.kind === 'video' && t.readyState === 'live');
+      
+      if (hasVideoTrack) {
+        if (video.srcObject !== stream) {
+          video.srcObject = stream;
+          console.log('Updated remote video srcObject in useEffect');
+        }
+        if (video.paused) {
+          video.play().then(() => {
+            console.log('Remote video playing from useEffect');
+            setRemoteConnected(true);
+          }).catch((err) => {
+            console.error('Error playing remote video in useEffect:', err);
+          });
+        }
       }
     }
   }, [remoteConnected, status]);
@@ -217,47 +232,93 @@ export default function ChatRoom() {
   // --- WebRTC logic ---
   async function setupRTC(initiator: boolean) {
     cleanUpPeer();
-    if (mediaStatus !== MediaStatus.Granted) return;
+    if (mediaStatus !== MediaStatus.Granted) {
+      console.log('Media not granted, cannot setup RTC');
+      return;
+    }
+    
+    console.log('Setting up RTC, initiator:', initiator);
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     peerRef.current = pc;
 
+    // Create a new stream to collect remote tracks
+    remoteStreamRef.current = new MediaStream();
+    
     // Stream local - add all tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         pc.addTrack(track, localStreamRef.current!);
-        console.log('Added local track:', track.kind, track.enabled);
+        console.log('Added local track:', track.kind, track.enabled, track.id);
       });
+    } else {
+      console.warn('No local stream available');
     }
 
-    // Remote incoming track - handle multiple tracks properly
+    // Remote incoming track - collect all tracks into one stream
     pc.ontrack = (event) => {
-      console.log('Received remote track:', event.track.kind, event.streams.length);
-      setRemoteConnected(true);
+      console.log('=== ONTRACK EVENT ===');
+      console.log('Track kind:', event.track.kind);
+      console.log('Track id:', event.track.id);
+      console.log('Track readyState:', event.track.readyState);
+      console.log('Streams in event:', event.streams.length);
+      console.log('Track enabled:', event.track.enabled);
       
-      // Get the first stream or create a new one from tracks
-      let remoteStream: MediaStream | null = null;
-      if (event.streams && event.streams.length > 0) {
-        remoteStream = event.streams[0];
-      } else if (event.track) {
-        // Fallback: create stream from track
-        remoteStream = new MediaStream([event.track]);
+      if (!event.track) {
+        console.error('No track in event!');
+        return;
       }
-
-      if (remoteStream && remoteVideoRef.current) {
-        // If there's already a stream, add the new track to it
-        if (remoteVideoRef.current.srcObject) {
-          const existingStream = remoteVideoRef.current.srcObject as MediaStream;
-          if (event.track && !existingStream.getTracks().includes(event.track)) {
-            existingStream.addTrack(event.track);
-          }
-        } else {
-          remoteVideoRef.current.srcObject = remoteStream;
+      
+      // Initialize remote stream if needed
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
+        console.log('Created new remote stream');
+      }
+      
+      // Check if track already exists
+      const existingTrack = remoteStreamRef.current.getTracks().find(t => t.id === event.track.id);
+      if (!existingTrack) {
+        remoteStreamRef.current.addTrack(event.track);
+        console.log('Added track to remote stream. Total tracks:', remoteStreamRef.current.getTracks().length);
+        
+        // Log all current tracks
+        remoteStreamRef.current.getTracks().forEach(t => {
+          console.log(`  - Track: ${t.kind}, id: ${t.id}, readyState: ${t.readyState}`);
+        });
+      } else {
+        console.log('Track already exists, skipping');
+      }
+      
+      // Check if we have video tracks
+      const videoTracks = remoteStreamRef.current.getVideoTracks();
+      const hasVideo = videoTracks.length > 0;
+      
+      console.log('Has video tracks:', hasVideo, 'count:', videoTracks.length);
+      
+      if (hasVideo && remoteVideoRef.current) {
+        // Set the stream on video element
+        if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+          console.log('Setting remote video srcObject');
+          remoteVideoRef.current.srcObject = remoteStreamRef.current;
         }
         
-        // Ensure video plays
-        remoteVideoRef.current.play().catch((err) => {
-          console.error('Error playing remote video:', err);
-        });
+        // Try to play the video
+        const playPromise = remoteVideoRef.current.play();
+        if (playPromise !== undefined) {
+          playPromise.then(() => {
+            console.log('✅ Remote video playing successfully!');
+            setRemoteConnected(true);
+          }).catch((err) => {
+            console.error('❌ Error playing remote video:', err);
+            // Try again after a short delay
+            setTimeout(() => {
+              if (remoteVideoRef.current && remoteVideoRef.current.srcObject) {
+                remoteVideoRef.current.play().catch(console.error);
+              }
+            }, 500);
+          });
+        }
+      } else if (!hasVideo) {
+        console.log('Waiting for video track...');
       }
     };
     // ICE candidate
@@ -272,12 +333,29 @@ export default function ChatRoom() {
       console.log('Peer connection state:', pc.connectionState);
       if (pc.connectionState === 'connected') {
         console.log('Peer connection established!');
+        // Check if we have remote tracks
+        if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0) {
+          setRemoteConnected(true);
+        }
+      } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        setRemoteConnected(false);
       }
     };
     pc.oniceconnectionstatechange = () => {
       console.log('ICE connection state:', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-        setRemoteConnected(true);
+        console.log('ICE connection established');
+        // Check tracks after ICE connects
+        setTimeout(() => {
+          if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0) {
+            console.log('Setting remote connected after ICE completion');
+            setRemoteConnected(true);
+            if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
+              remoteVideoRef.current.srcObject = remoteStreamRef.current;
+              remoteVideoRef.current.play().catch(console.error);
+            }
+          }
+        }, 500);
       } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
         setRemoteConnected(false);
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
@@ -304,10 +382,17 @@ export default function ChatRoom() {
       peerRef.current.ontrack = null;
       peerRef.current.oniceconnectionstatechange = null;
       peerRef.current.onicecandidate = null;
+      peerRef.current.onconnectionstatechange = null;
       peerRef.current.close();
       peerRef.current = null;
     }
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteStreamRef.current) {
+      remoteStreamRef.current.getTracks().forEach(track => track.stop());
+      remoteStreamRef.current = null;
+    }
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
     setRemoteConnected(false);
   }
 
@@ -353,26 +438,45 @@ export default function ChatRoom() {
             )}
           </div>
           <div className="flex-1 bg-zinc-800 rounded-xl h-56 md:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
-            {status === 'chatting' && remoteConnected ? (
-              <video 
-                ref={remoteVideoRef} 
-                autoPlay 
-                playsInline 
-                className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
-                onLoadedMetadata={() => {
-                  if (remoteVideoRef.current) {
-                    remoteVideoRef.current.play().catch(console.error);
-                  }
-                }}
-                onCanPlay={() => {
-                  console.log('Remote video can play');
-                  if (remoteVideoRef.current) {
-                    remoteVideoRef.current.play().catch(console.error);
-                  }
-                }}
-              />
-            ) : status === 'chatting' && !remoteConnected ? (
-              <span className="text-zinc-500">Connecting...</span>
+            {status === 'chatting' ? (
+              remoteConnected && remoteStreamRef.current && remoteStreamRef.current.getVideoTracks().length > 0 ? (
+                <video 
+                  ref={remoteVideoRef} 
+                  autoPlay 
+                  playsInline 
+                  muted={false}
+                  className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
+                  onLoadedMetadata={() => {
+                    console.log('Remote video metadata loaded');
+                    if (remoteVideoRef.current) {
+                      remoteVideoRef.current.play().catch(console.error);
+                    }
+                  }}
+                  onCanPlay={() => {
+                    console.log('Remote video can play');
+                    if (remoteVideoRef.current) {
+                      remoteVideoRef.current.play().catch(console.error);
+                    }
+                  }}
+                  onPlay={() => {
+                    console.log('Remote video started playing');
+                    setRemoteConnected(true);
+                  }}
+                  onError={(e) => {
+                    console.error('Remote video error:', e);
+                  }}
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2">
+                  <span className="text-zinc-500">Connecting...</span>
+                  {remoteStreamRef.current && (
+                    <span className="text-xs text-zinc-600">
+                      Tracks: {remoteStreamRef.current.getTracks().length} 
+                      (Video: {remoteStreamRef.current.getVideoTracks().length})
+                    </span>
+                  )}
+                </div>
+              )
             ) : status === 'skipped' ? (
               <span className="text-red-400">User skipped</span>
             ) : (
