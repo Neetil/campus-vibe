@@ -42,6 +42,8 @@ export default function ChatRoom() {
   // WebRTC peer connection
   const peerRef = useRef<RTCPeerConnection|null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
+  const isSettingUpRTCRef = useRef<boolean>(false);
   
   // Helper function to safely play video
   const safePlayVideo = (videoElement: HTMLVideoElement | null, name: string = 'video') => {
@@ -240,12 +242,26 @@ export default function ChatRoom() {
       const pc = peerRef.current;
       if (!pc) {
         console.error('No peer connection after setup');
+        isSettingUpRTCRef.current = false;
         return;
       }
       try {
         console.log('Setting remote description from offer...');
         await pc.setRemoteDescription(new RTCSessionDescription(desc));
         console.log('✅ Set remote description from offer');
+        
+        // Process any queued ICE candidates
+        while (pendingIceCandidatesRef.current.length > 0) {
+          const candidate = pendingIceCandidatesRef.current.shift();
+          if (candidate) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              console.log('✅ Added queued ICE candidate');
+            } catch (err) {
+              console.error('❌ Error adding queued ICE candidate:', err);
+            }
+          }
+        }
         
         console.log('Creating answer...');
         const answer = await pc.createAnswer({
@@ -255,8 +271,10 @@ export default function ChatRoom() {
         await pc.setLocalDescription(answer);
         socket.emit('rtc-answer', answer);
         console.log('✅ Sent WebRTC answer');
+        isSettingUpRTCRef.current = false;
       } catch (err) {
         console.error('❌ Error handling offer:', err);
+        isSettingUpRTCRef.current = false;
       }
     });
     socket.on('rtc-answer', async (desc: RTCSessionDescriptionInit) => {
@@ -269,6 +287,19 @@ export default function ChatRoom() {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(desc));
         console.log('✅ Set remote description from answer');
+        
+        // Process any queued ICE candidates
+        while (pendingIceCandidatesRef.current.length > 0) {
+          const candidate = pendingIceCandidatesRef.current.shift();
+          if (candidate) {
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              console.log('✅ Added queued ICE candidate');
+            } catch (err) {
+              console.error('❌ Error adding queued ICE candidate:', err);
+            }
+          }
+        }
         
         // Check if we have any remote tracks already
         const receivers = pc.getReceivers();
@@ -284,14 +315,29 @@ export default function ChatRoom() {
       console.log('📥 Received ICE candidate');
       const pc = peerRef.current;
       if (!pc) {
-        console.warn('No peer connection when candidate received');
+        console.warn('No peer connection when candidate received, queuing...');
+        pendingIceCandidatesRef.current.push(candidate);
         return;
       }
+      
+      // If remote description is not set yet, queue the candidate
+      if (!pc.remoteDescription) {
+        console.log('Remote description not set yet, queuing ICE candidate');
+        pendingIceCandidatesRef.current.push(candidate);
+        return;
+      }
+      
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
         console.log('✅ Added ICE candidate');
-      } catch (err) {
-        console.error('❌ Error adding ICE candidate:', err);
+      } catch (err: any) {
+        // If error is because remote description is null, queue it
+        if (err.message?.includes('remote description') || err.name === 'InvalidStateError') {
+          console.log('Queuing ICE candidate (remote description issue)');
+          pendingIceCandidatesRef.current.push(candidate);
+        } else {
+          console.error('❌ Error adding ICE candidate:', err);
+        }
       }
     });
     // ---------------------------
