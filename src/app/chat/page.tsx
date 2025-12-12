@@ -151,24 +151,19 @@ export default function ChatRoom() {
       const stream = remoteStreamRef.current;
       
       // Check if stream has video tracks
-      const hasVideoTrack = stream.getTracks().some(t => t.kind === 'video' && t.readyState === 'live');
+      const videoTracks = stream.getVideoTracks();
+      const hasVideoTrack = videoTracks.length > 0 && videoTracks.some(t => t.readyState === 'live');
       
       if (hasVideoTrack) {
         if (video.srcObject !== stream) {
           video.srcObject = stream;
           console.log('Updated remote video srcObject in useEffect');
         }
-        if (video.paused) {
-          video.play().then(() => {
-            console.log('Remote video playing from useEffect');
-            setRemoteConnected(true);
-          }).catch((err) => {
-            console.error('Error playing remote video in useEffect:', err);
-          });
-        }
+        safePlayVideo(video, 'remote video in useEffect');
+        setRemoteConnected(true);
       }
     }
-  }, [remoteConnected, status]);
+  }, [status]); // Only depend on status, check stream refs directly
 
   // Socket.IO setup and WebRTC signaling
   useEffect(() => {
@@ -540,6 +535,9 @@ export default function ChatRoom() {
       
       console.log('Has video tracks:', hasVideo, 'count:', videoTracks.length);
       
+      // Update state to trigger re-render
+      setRemoteVideoTrackCount(videoTracks.length);
+      
       if (hasVideo && remoteVideoRef.current) {
         // Set the stream on video element
         if (remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
@@ -699,6 +697,7 @@ export default function ChatRoom() {
       remoteVideoRef.current.srcObject = null;
     }
     setRemoteConnected(false);
+    setRemoteVideoTrackCount(0);
   }
 
   function stopMedia() {
@@ -758,7 +757,7 @@ export default function ChatRoom() {
           </div>
           <div className="flex-1 bg-zinc-800 rounded-xl h-40 md:h-56 lg:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
             {status === 'chatting' ? (
-              remoteConnected && remoteStreamRef.current && remoteStreamRef.current.getVideoTracks().length > 0 ? (
+              remoteVideoTrackCount > 0 && remoteStreamRef.current ? (
                 <video 
                   ref={remoteVideoRef} 
                   autoPlay 
@@ -767,7 +766,7 @@ export default function ChatRoom() {
                   className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
                   onLoadedMetadata={() => {
                     console.log('Remote video metadata loaded');
-                    safePlayVideo(remoteVideoRef.current, 'remote video on canplay');
+                    safePlayVideo(remoteVideoRef.current, 'remote video on metadata');
                   }}
                   onCanPlay={() => {
                     console.log('Remote video can play');
