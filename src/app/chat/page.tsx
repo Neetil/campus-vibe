@@ -54,16 +54,33 @@ export default function ChatRoom() {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localStreamRef.current = stream;
         setMediaStatus(MediaStatus.Granted);
+        // Set stream on video element when available
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch((err) => {
+            console.error('Error playing local video:', err);
+          });
         }
-      } catch {
+      } catch (err) {
+        console.error('Error accessing media devices:', err);
         setMediaStatus(MediaStatus.Denied);
       }
     }
     getUserMediaFn();
     return () => stopMedia();
   }, []);
+
+  // Ensure local video element gets stream when it becomes available
+  useEffect(() => {
+    if (localVideoRef.current && localStreamRef.current && mediaStatus === MediaStatus.Granted) {
+      if (localVideoRef.current.srcObject !== localStreamRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+        localVideoRef.current.play().catch((err) => {
+          console.error('Error playing local video:', err);
+        });
+      }
+    }
+  }, [mediaStatus]);
 
   // Socket.IO setup and WebRTC signaling
   useEffect(() => {
@@ -174,21 +191,31 @@ export default function ChatRoom() {
 
     // Remote incoming track
     pc.ontrack = (event) => {
+      console.log('Received remote track:', event.track.kind);
       setRemoteConnected(true);
-      if (remoteVideoRef.current) {
+      if (remoteVideoRef.current && event.streams && event.streams[0]) {
         remoteVideoRef.current.srcObject = event.streams[0];
-      }
-    };
-    pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
-        setRemoteConnected(false);
-        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+        remoteVideoRef.current.play().catch((err) => {
+          console.error('Error playing remote video:', err);
+        });
       }
     };
     // ICE candidate
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         socketRef.current?.emit('rtc-candidate', e.candidate);
+      }
+    };
+
+    // Connection state logging for debugging
+    pc.onconnectionstatechange = () => {
+      console.log('Peer connection state:', pc.connectionState);
+    };
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE connection state:', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
+        setRemoteConnected(false);
+        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       }
     };
 
@@ -233,7 +260,18 @@ export default function ChatRoom() {
         <div className="flex flex-col md:flex-row gap-4 justify-center items-center">
           <div className="flex-1 bg-zinc-800 rounded-xl h-56 md:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
             {mediaStatus === MediaStatus.Granted ? (
-              <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow" />
+              <video 
+                ref={localVideoRef} 
+                autoPlay 
+                muted 
+                playsInline 
+                className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
+                onLoadedMetadata={() => {
+                  if (localVideoRef.current) {
+                    localVideoRef.current.play().catch(console.error);
+                  }
+                }}
+              />
             ) : mediaStatus === MediaStatus.Denied ? (
               <span className="text-zinc-500">Camera/mic denied</span>
             ) : (
@@ -242,7 +280,17 @@ export default function ChatRoom() {
           </div>
           <div className="flex-1 bg-zinc-800 rounded-xl h-56 md:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
             {status === 'chatting' && remoteConnected ? (
-              <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow" />
+              <video 
+                ref={remoteVideoRef} 
+                autoPlay 
+                playsInline 
+                className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
+                onLoadedMetadata={() => {
+                  if (remoteVideoRef.current) {
+                    remoteVideoRef.current.play().catch(console.error);
+                  }
+                }}
+              />
             ) : status === 'chatting' && !remoteConnected ? (
               <span className="text-zinc-500">Connecting...</span>
             ) : (

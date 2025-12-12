@@ -31,6 +31,28 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Relay WebRTC signaling messages
+  socket.on('rtc-offer', (offer) => {
+    const partnerId = partners.get(socket.id);
+    if (partnerId && io.sockets.sockets.get(partnerId)) {
+      io.sockets.sockets.get(partnerId).emit('rtc-offer', offer);
+    }
+  });
+
+  socket.on('rtc-answer', (answer) => {
+    const partnerId = partners.get(socket.id);
+    if (partnerId && io.sockets.sockets.get(partnerId)) {
+      io.sockets.sockets.get(partnerId).emit('rtc-answer', answer);
+    }
+  });
+
+  socket.on('rtc-candidate', (candidate) => {
+    const partnerId = partners.get(socket.id);
+    if (partnerId && io.sockets.sockets.get(partnerId)) {
+      io.sockets.sockets.get(partnerId).emit('rtc-candidate', candidate);
+    }
+  });
+
   // Handle "next" (disconnect current, look for new)
   socket.on('next', () => {
     const partnerId = partners.get(socket.id);
