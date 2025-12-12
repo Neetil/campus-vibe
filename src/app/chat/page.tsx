@@ -42,6 +42,33 @@ export default function ChatRoom() {
   // WebRTC peer connection
   const peerRef = useRef<RTCPeerConnection|null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  
+  // Helper function to safely play video
+  const safePlayVideo = (videoElement: HTMLVideoElement | null, name: string = 'video') => {
+    if (!videoElement) return;
+    
+    // Don't play if already playing or if srcObject is not set
+    if (!videoElement.srcObject) return;
+    
+    // Check if video is already playing
+    if (!videoElement.paused && videoElement.readyState >= 2) {
+      return;
+    }
+    
+    const playPromise = videoElement.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          console.log(`✅ ${name} playing successfully`);
+        })
+        .catch((error) => {
+          // Ignore AbortError - it means play was interrupted, which is fine
+          if (error.name !== 'AbortError' && error.name !== 'NotAllowedError') {
+            console.error(`❌ Error playing ${name}:`, error);
+          }
+        });
+    }
+  };
 
   // Function to request media permissions
   const requestMediaPermissions = async (): Promise<boolean> => {
@@ -67,9 +94,11 @@ export default function ChatRoom() {
       // Set stream on video element when available
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play().catch((err) => {
-          console.error('Error playing local video:', err);
-        });
+        // Wait for metadata to load before playing
+        localVideoRef.current.onloadedmetadata = () => {
+          safePlayVideo(localVideoRef.current, 'local video');
+        };
+        safePlayVideo(localVideoRef.current, 'local video');
       }
       
       return true;
@@ -100,9 +129,8 @@ export default function ChatRoom() {
     if (localVideoRef.current && localStreamRef.current && mediaStatus === MediaStatus.Granted) {
       if (localVideoRef.current.srcObject !== localStreamRef.current) {
         localVideoRef.current.srcObject = localStreamRef.current;
-        localVideoRef.current.play().catch((err) => {
-          console.error('Error playing local video:', err);
-        });
+        // Use safe play function
+        safePlayVideo(localVideoRef.current, 'local video');
       }
     }
     
@@ -111,6 +139,7 @@ export default function ChatRoom() {
       const wasInitiator = peerRef.current?.localDescription !== null;
       setupRTC(wasInitiator).catch(console.error);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mediaStatus, status]);
 
   // Ensure remote video plays when stream is available
@@ -404,22 +433,9 @@ export default function ChatRoom() {
           remoteVideoRef.current.srcObject = remoteStreamRef.current;
         }
         
-        // Try to play the video
-        const playPromise = remoteVideoRef.current.play();
-        if (playPromise !== undefined) {
-          playPromise.then(() => {
-            console.log('✅ Remote video playing successfully!');
-            setRemoteConnected(true);
-          }).catch((err) => {
-            console.error('❌ Error playing remote video:', err);
-            // Try again after a short delay
-            setTimeout(() => {
-              if (remoteVideoRef.current && remoteVideoRef.current.srcObject) {
-                remoteVideoRef.current.play().catch(console.error);
-              }
-            }, 500);
-          });
-        }
+        // Use safe play function
+        safePlayVideo(remoteVideoRef.current, 'remote video');
+        setRemoteConnected(true);
       } else if (!hasVideo) {
         console.log('Waiting for video track...');
       }
@@ -515,10 +531,8 @@ export default function ChatRoom() {
             
             if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0 && remoteVideoRef.current) {
               remoteVideoRef.current.srcObject = remoteStreamRef.current;
-              remoteVideoRef.current.play().then(() => {
-                console.log('✅ Remote video playing from receiver tracks');
-                setRemoteConnected(true);
-              }).catch(console.error);
+              safePlayVideo(remoteVideoRef.current, 'remote video from receivers after ICE');
+              setRemoteConnected(true);
             }
           }
         }, 500);
@@ -593,9 +607,7 @@ export default function ChatRoom() {
                 playsInline 
                 className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
                 onLoadedMetadata={() => {
-                  if (localVideoRef.current) {
-                    localVideoRef.current.play().catch(console.error);
-                  }
+                  safePlayVideo(localVideoRef.current, 'local video on metadata');
                 }}
               />
             ) : mediaStatus === MediaStatus.Denied ? (
@@ -631,15 +643,11 @@ export default function ChatRoom() {
                   className="h-full w-full object-cover rounded-xl border-2 border-indigo-700/40 shadow"
                   onLoadedMetadata={() => {
                     console.log('Remote video metadata loaded');
-                    if (remoteVideoRef.current) {
-                      remoteVideoRef.current.play().catch(console.error);
-                    }
+                    safePlayVideo(remoteVideoRef.current, 'remote video on canplay');
                   }}
                   onCanPlay={() => {
                     console.log('Remote video can play');
-                    if (remoteVideoRef.current) {
-                      remoteVideoRef.current.play().catch(console.error);
-                    }
+                    safePlayVideo(remoteVideoRef.current, 'remote video on canplay');
                   }}
                   onPlay={() => {
                     console.log('Remote video started playing');
