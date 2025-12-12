@@ -208,7 +208,22 @@ export default function ChatRoom() {
     socket.on('partnerFound', async () => {
       setStatus('chatting');
       setMessages([]);
-      await setupRTC(true); // true = createOffer if initiator
+      
+      // Wait a short random delay, then check if we received an offer
+      // The peer who receives an offer first is NOT the initiator
+      let receivedOffer = false;
+      const offerHandler = () => { receivedOffer = true; };
+      socket.once('rtc-offer', offerHandler);
+      
+      await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 50));
+      
+      socket.off('rtc-offer', offerHandler);
+      
+      // If we received an offer, we're NOT the initiator
+      // Otherwise, we ARE the initiator
+      const isInitiator = !receivedOffer;
+      console.log('Determined initiator status:', isInitiator, '(received offer:', receivedOffer, ')');
+      await setupRTC(isInitiator);
     });
 
     socket.on('waiting', () => {
@@ -238,11 +253,23 @@ export default function ChatRoom() {
     // ---- WebRTC signaling ----
     socket.on('rtc-offer', async (desc: RTCSessionDescriptionInit) => {
       console.log('📥 Received WebRTC offer');
-      await setupRTC(false); // Not initiator
+      
+      // Only setup if we don't already have a peer connection
+      if (!peerRef.current || peerRef.current.connectionState === 'closed' || peerRef.current.connectionState === 'failed') {
+        await setupRTC(false); // Not initiator
+      } else {
+        console.log('⚠️ Already have peer connection, will use existing');
+      }
+      
       const pc = peerRef.current;
       if (!pc) {
         console.error('No peer connection after setup');
-        isSettingUpRTCRef.current = false;
+        return;
+      }
+      
+      // Don't set remote description if already set
+      if (pc.remoteDescription) {
+        console.log('⚠️ Remote description already set, skipping');
         return;
       }
       try {
@@ -395,7 +422,34 @@ export default function ChatRoom() {
 
   // --- WebRTC logic ---
   async function setupRTC(initiator: boolean) {
-    cleanUpPeer();
+    // Prevent multiple simultaneous setups
+    if (isSettingUpRTCRef.current) {
+      console.log('⚠️ RTC setup already in progress, skipping...');
+      return;
+    }
+    
+    // Don't destroy existing working or connecting connection
+    if (peerRef.current) {
+      const state = peerRef.current.connectionState;
+      if (state === 'connected' || state === 'connecting') {
+        console.log('⚠️ Peer connection already', state, ', skipping setup');
+        isSettingUpRTCRef.current = false;
+        return;
+      }
+      // Only cleanup if connection is failed/closed/disconnected
+      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+        console.log('Cleaning up failed/closed connection before new setup');
+        cleanUpPeer();
+      } else {
+        // If in 'new' or 'checking' state, don't destroy it
+        console.log('⚠️ Peer connection in', state, 'state, skipping setup');
+        isSettingUpRTCRef.current = false;
+        return;
+      }
+    }
+    
+    isSettingUpRTCRef.current = true;
+    pendingIceCandidatesRef.current = []; // Clear pending candidates
     
     // Check if we have media access
     if (!localStreamRef.current || mediaStatus !== MediaStatus.Granted) {
@@ -403,6 +457,7 @@ export default function ChatRoom() {
       const granted = await requestMediaPermissions();
       if (!granted) {
         console.log('Media permissions denied, cannot setup RTC');
+        isSettingUpRTCRef.current = false;
         return;
       }
       // Wait a moment for state to update
@@ -412,6 +467,7 @@ export default function ChatRoom() {
     // Double check we have a stream
     if (!localStreamRef.current) {
       console.log('No local stream available after permission request');
+      isSettingUpRTCRef.current = false;
       return;
     }
     
