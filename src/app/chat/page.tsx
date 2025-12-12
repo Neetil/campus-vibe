@@ -47,27 +47,55 @@ export default function ChatRoom() {
   const peerRef = useRef<RTCPeerConnection|null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
 
+  // Function to request media permissions
+  const requestMediaPermissions = async (): Promise<boolean> => {
+    setMediaStatus(MediaStatus.Pending);
+    try {
+      // Check if mediaDevices is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Media devices API not available. Please use HTTPS or localhost.');
+      }
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'user'
+        }, 
+        audio: true 
+      });
+      
+      localStreamRef.current = stream;
+      setMediaStatus(MediaStatus.Granted);
+      
+      // Set stream on video element when available
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch((err) => {
+          console.error('Error playing local video:', err);
+        });
+      }
+      
+      return true;
+    } catch (err: any) {
+      console.error('Error accessing media devices:', err);
+      setMediaStatus(MediaStatus.Denied);
+      
+      // Show specific error message
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        console.error('User denied camera/microphone permissions');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        console.error('No camera/microphone found');
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        console.error('Camera/microphone is already in use');
+      }
+      return false;
+    }
+  };
+
   // Camera/mic: prompt immediately
   useEffect(() => {
-    async function getUserMediaFn() {
-      setMediaStatus(MediaStatus.Pending);
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        localStreamRef.current = stream;
-        setMediaStatus(MediaStatus.Granted);
-        // Set stream on video element when available
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-          localVideoRef.current.play().catch((err) => {
-            console.error('Error playing local video:', err);
-          });
-        }
-      } catch (err) {
-        console.error('Error accessing media devices:', err);
-        setMediaStatus(MediaStatus.Denied);
-      }
-    }
-    getUserMediaFn();
+    requestMediaPermissions();
     return () => stopMedia();
   }, []);
 
@@ -81,7 +109,13 @@ export default function ChatRoom() {
         });
       }
     }
-  }, [mediaStatus]);
+    
+    // If media was just granted and we're chatting, re-setup RTC
+    if (mediaStatus === MediaStatus.Granted && status === 'chatting' && socketRef.current) {
+      const wasInitiator = peerRef.current?.localDescription !== null;
+      setupRTC(wasInitiator).catch(console.error);
+    }
+  }, [mediaStatus, status]);
 
   // Ensure remote video plays when stream is available
   useEffect(() => {
@@ -111,10 +145,38 @@ export default function ChatRoom() {
 
   // Socket.IO setup and WebRTC signaling
   useEffect(() => {
-    const socket = io(SOCKET_URL ?? '', { transports: ['websocket'] });
+    if (!SOCKET_URL) {
+      console.error('Socket URL not configured');
+      return;
+    }
+
+    const socket = io(SOCKET_URL, { 
+      transports: ['websocket', 'polling'], // Fallback to polling if websocket fails
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+    });
+    
     socketRef.current = socket;
-    setStatus('waiting');
-    socket.emit('findPartner');
+    
+    socket.on('connect', () => {
+      console.log('✅ Socket connected:', socket.id);
+      setStatus('waiting');
+      socket.emit('findPartner');
+    });
+
+    socket.on('connect_error', (error) => {
+      console.error('❌ Socket connection error:', error);
+      setStatus('disconnected');
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+      if (reason === 'io server disconnect') {
+        // Server disconnected, try to reconnect
+        socket.connect();
+      }
+    });
 
     socket.on('partnerFound', async () => {
       setStatus('chatting');
@@ -232,8 +294,22 @@ export default function ChatRoom() {
   // --- WebRTC logic ---
   async function setupRTC(initiator: boolean) {
     cleanUpPeer();
-    if (mediaStatus !== MediaStatus.Granted) {
-      console.log('Media not granted, cannot setup RTC');
+    
+    // Check if we have media access
+    if (!localStreamRef.current || mediaStatus !== MediaStatus.Granted) {
+      console.log('Media not granted, attempting to request permissions...');
+      const granted = await requestMediaPermissions();
+      if (!granted) {
+        console.log('Media permissions denied, cannot setup RTC');
+        return;
+      }
+      // Wait a moment for state to update
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    // Double check we have a stream
+    if (!localStreamRef.current) {
+      console.log('No local stream available after permission request');
       return;
     }
     
@@ -416,8 +492,8 @@ export default function ChatRoom() {
       <h1 className="text-white text-2xl md:text-3xl font-bold mt-2 mb-2">Campus Vibe</h1>
       <div className="text-zinc-400 mb-6">Anonymous Text & Video Chat</div>
       <section className="max-w-2xl w-full flex flex-col gap-4 bg-zinc-900/60 rounded-2xl shadow-xl border border-zinc-800 p-4 md:p-8 min-h-[550px]">
-        <div className="flex flex-col md:flex-row gap-4 justify-center items-center">
-          <div className="flex-1 bg-zinc-800 rounded-xl h-56 md:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
+        <div className="flex flex-row gap-2 md:gap-4 justify-center items-center">
+          <div className="flex-1 bg-zinc-800 rounded-xl h-40 md:h-56 lg:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
             {mediaStatus === MediaStatus.Granted ? (
               <video 
                 ref={localVideoRef} 
@@ -432,12 +508,28 @@ export default function ChatRoom() {
                 }}
               />
             ) : mediaStatus === MediaStatus.Denied ? (
-              <span className="text-zinc-500">Camera/mic denied</span>
+              <div className="flex flex-col items-center justify-center gap-2 p-4">
+                <span className="text-red-400 text-center">Camera/mic access denied</span>
+                <Button 
+                  onClick={requestMediaPermissions}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2"
+                >
+                  Grant Permissions
+                </Button>
+              </div>
             ) : (
-              <span className="text-zinc-400">Grant camera & mic permissions to see your video</span>
+              <div className="flex flex-col items-center justify-center gap-2 p-4">
+                <span className="text-zinc-400 text-center">Requesting camera & mic permissions...</span>
+                <Button 
+                  onClick={requestMediaPermissions}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2"
+                >
+                  Allow Access
+                </Button>
+              </div>
             )}
           </div>
-          <div className="flex-1 bg-zinc-800 rounded-xl h-56 md:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
+          <div className="flex-1 bg-zinc-800 rounded-xl h-40 md:h-56 lg:h-72 flex items-center justify-center border border-zinc-700 overflow-hidden relative">
             {status === 'chatting' ? (
               remoteConnected && remoteStreamRef.current && remoteStreamRef.current.getVideoTracks().length > 0 ? (
                 <video 
