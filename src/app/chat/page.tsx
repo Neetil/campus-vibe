@@ -311,6 +311,13 @@ export default function ChatRoom() {
         console.error('No peer connection when answer received');
         return;
       }
+      
+      // Don't set remote description if already set
+      if (pc.remoteDescription) {
+        console.log('⚠️ Remote description already set, skipping answer');
+        return;
+      }
+      
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(desc));
         console.log('✅ Set remote description from answer');
@@ -334,8 +341,13 @@ export default function ChatRoom() {
         receivers.forEach((receiver, idx) => {
           console.log(`  Receiver ${idx}:`, receiver.track?.kind, receiver.track?.id);
         });
-      } catch (err) {
-        console.error('❌ Error setting remote description from answer:', err);
+      } catch (err: any) {
+        // If error is because description is already set, that's okay
+        if (err.message?.includes('wrong state') || err.name === 'InvalidStateError') {
+          console.log('⚠️ Remote description already set (ignoring error)');
+        } else {
+          console.error('❌ Error setting remote description from answer:', err);
+        }
       }
     });
     socket.on('rtc-candidate', async (candidate: RTCIceCandidateInit) => {
@@ -616,7 +628,7 @@ export default function ChatRoom() {
             setRemoteConnected(true);
             if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
               remoteVideoRef.current.srcObject = remoteStreamRef.current;
-              remoteVideoRef.current.play().catch(console.error);
+              safePlayVideo(remoteVideoRef.current, 'remote video after ICE');
             }
           } else {
             console.log('⚠️ ICE connected but no remote tracks in stream. Checking receivers...');
@@ -638,7 +650,17 @@ export default function ChatRoom() {
             }
           }
         }, 500);
-      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
+      } else if (pc.iceConnectionState === 'disconnected') {
+        console.log('⚠️ ICE connection disconnected (may reconnect)');
+        // Don't immediately clear - wait a bit to see if it reconnects
+        setTimeout(() => {
+          if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+            console.log('❌ ICE connection lost:', pc.iceConnectionState);
+            setRemoteConnected(false);
+            if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+          }
+        }, 2000);
+      } else if (pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
         console.log('❌ ICE connection lost:', pc.iceConnectionState);
         setRemoteConnected(false);
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
