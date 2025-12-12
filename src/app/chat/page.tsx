@@ -38,6 +38,7 @@ export default function ChatRoom() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const [remoteConnected, setRemoteConnected] = useState(false);
+  const [remoteVideoTrackCount, setRemoteVideoTrackCount] = useState(0);
 
   // WebRTC peer connection
   const peerRef = useRef<RTCPeerConnection|null>(null);
