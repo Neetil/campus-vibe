@@ -206,33 +206,64 @@ export default function ChatRoom() {
 
     // ---- WebRTC signaling ----
     socket.on('rtc-offer', async (desc: RTCSessionDescriptionInit) => {
+      console.log('📥 Received WebRTC offer');
       await setupRTC(false); // Not initiator
       const pc = peerRef.current;
-      if (!pc) return;
+      if (!pc) {
+        console.error('No peer connection after setup');
+        return;
+      }
       try {
+        console.log('Setting remote description from offer...');
         await pc.setRemoteDescription(new RTCSessionDescription(desc));
+        console.log('✅ Set remote description from offer');
+        
+        console.log('Creating answer...');
         const answer = await pc.createAnswer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: true
         });
         await pc.setLocalDescription(answer);
         socket.emit('rtc-answer', answer);
-        console.log('Sent WebRTC answer');
+        console.log('✅ Sent WebRTC answer');
       } catch (err) {
-        console.error('Error handling offer:', err);
+        console.error('❌ Error handling offer:', err);
       }
     });
     socket.on('rtc-answer', async (desc: RTCSessionDescriptionInit) => {
+      console.log('📥 Received WebRTC answer');
       const pc = peerRef.current;
-      if (!pc) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(desc));
+      if (!pc) {
+        console.error('No peer connection when answer received');
+        return;
+      }
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(desc));
+        console.log('✅ Set remote description from answer');
+        
+        // Check if we have any remote tracks already
+        const receivers = pc.getReceivers();
+        console.log('Current receivers:', receivers.length);
+        receivers.forEach((receiver, idx) => {
+          console.log(`  Receiver ${idx}:`, receiver.track?.kind, receiver.track?.id);
+        });
+      } catch (err) {
+        console.error('❌ Error setting remote description from answer:', err);
+      }
     });
     socket.on('rtc-candidate', async (candidate: RTCIceCandidateInit) => {
+      console.log('📥 Received ICE candidate');
       const pc = peerRef.current;
-      if (!pc) return;
+      if (!pc) {
+        console.warn('No peer connection when candidate received');
+        return;
+      }
       try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {}
+        console.log('✅ Added ICE candidate');
+      } catch (err) {
+        console.error('❌ Error adding ICE candidate:', err);
+      }
     });
     // ---------------------------
 
@@ -402,33 +433,97 @@ export default function ChatRoom() {
 
     // Connection state logging for debugging
     pc.onconnectionstatechange = () => {
-      console.log('Peer connection state:', pc.connectionState);
+      console.log('🔗 Peer connection state:', pc.connectionState);
       if (pc.connectionState === 'connected') {
-        console.log('Peer connection established!');
+        console.log('✅ Peer connection established!');
         // Check if we have remote tracks
         if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0) {
+          console.log('Remote tracks available, setting connected');
           setRemoteConnected(true);
+        } else {
+          console.log('⚠️ Connected but no remote tracks yet. Checking receivers...');
+          // Check receivers and try to get tracks
+          const receivers = pc.getReceivers();
+          console.log('Total receivers:', receivers.length);
+          receivers.forEach((receiver, idx) => {
+            const track = receiver.track;
+            console.log(`  Receiver ${idx}:`, track?.kind, track?.id, track?.readyState);
+            if (track && !remoteStreamRef.current?.getTracks().find(t => t.id === track.id)) {
+              if (!remoteStreamRef.current) {
+                remoteStreamRef.current = new MediaStream();
+              }
+              remoteStreamRef.current.addTrack(track);
+              console.log('✅ Added track from receiver:', track.kind);
+            }
+          });
+          
+          if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0) {
+            console.log('✅ Setting remote connected from receivers');
+            setRemoteConnected(true);
+            if (remoteVideoRef.current) {
+              remoteVideoRef.current.srcObject = remoteStreamRef.current;
+              remoteVideoRef.current.play().then(() => {
+                console.log('✅ Remote video playing from receiver tracks');
+              }).catch(console.error);
+            }
+          }
         }
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+        console.log('❌ Peer connection lost:', pc.connectionState);
         setRemoteConnected(false);
       }
     };
     pc.oniceconnectionstatechange = () => {
-      console.log('ICE connection state:', pc.iceConnectionState);
+      console.log('🧊 ICE connection state:', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-        console.log('ICE connection established');
+        console.log('✅ ICE connection established');
+        
+        // Log all receivers and tracks
+        const receivers = pc.getReceivers();
+        console.log('Total receivers:', receivers.length);
+        receivers.forEach((receiver, idx) => {
+          const track = receiver.track;
+          console.log(`  Receiver ${idx}:`, {
+            kind: track?.kind,
+            id: track?.id,
+            readyState: track?.readyState,
+            enabled: track?.enabled
+          });
+        });
+        
         // Check tracks after ICE connects
         setTimeout(() => {
           if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0) {
-            console.log('Setting remote connected after ICE completion');
+            console.log('✅ Setting remote connected after ICE completion');
             setRemoteConnected(true);
             if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== remoteStreamRef.current) {
               remoteVideoRef.current.srcObject = remoteStreamRef.current;
               remoteVideoRef.current.play().catch(console.error);
             }
+          } else {
+            console.log('⚠️ ICE connected but no remote tracks in stream. Checking receivers...');
+            // Try to get tracks from receivers
+            receivers.forEach((receiver) => {
+              if (receiver.track && !remoteStreamRef.current?.getTracks().find(t => t.id === receiver.track!.id)) {
+                if (!remoteStreamRef.current) {
+                  remoteStreamRef.current = new MediaStream();
+                }
+                remoteStreamRef.current.addTrack(receiver.track);
+                console.log('Added track from receiver:', receiver.track.kind);
+              }
+            });
+            
+            if (remoteStreamRef.current && remoteStreamRef.current.getTracks().length > 0 && remoteVideoRef.current) {
+              remoteVideoRef.current.srcObject = remoteStreamRef.current;
+              remoteVideoRef.current.play().then(() => {
+                console.log('✅ Remote video playing from receiver tracks');
+                setRemoteConnected(true);
+              }).catch(console.error);
+            }
           }
         }, 500);
       } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
+        console.log('❌ ICE connection lost:', pc.iceConnectionState);
         setRemoteConnected(false);
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       }
