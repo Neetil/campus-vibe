@@ -8,14 +8,10 @@ const SOCKET_URL =
     ? "https://campus-vibe.onrender.com"
     : undefined;
 const ICE_SERVERS = [
-  { urls: 'stun:global.stun.twilio.com:3478?transport=udp' },
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
   {
-    urls: 'turn:global.turn.twilio.com:3478?transport=udp',
-    username: 'test',
-    credential: 'test'
-  },
-  {
-    urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
+    urls: 'turn:global.turn.twilio.com:3478',
     username: 'test',
     credential: 'test'
   }
