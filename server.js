@@ -57,13 +57,23 @@ io.on('connection', (socket) => {
   socket.on('next', () => {
     const partnerId = partners.get(socket.id);
     if (partnerId && io.sockets.sockets.get(partnerId)) {
-      io.sockets.sockets.get(partnerId).emit('partnerDisconnected');
+      io.sockets.sockets.get(partnerId).emit('partnerSkipped');
       partners.delete(partnerId);
     }
     partners.delete(socket.id);
     waiting = socket;
     socket.emit('waiting');
     socket.emit('findPartner');
+  });
+
+  // Handle "stop" (user leaves completely)
+  socket.on('stop', () => {
+    const partnerId = partners.get(socket.id);
+    if (partnerId && io.sockets.sockets.get(partnerId)) {
+      io.sockets.sockets.get(partnerId).emit('partnerSkipped');
+      partners.delete(partnerId);
+    }
+    partners.delete(socket.id);
   });
 
   // Handle leave/disconnect

@@ -21,7 +21,7 @@ const ICE_SERVERS = [
   }
 ];
 
-type ChatStatus = 'init' | 'waiting' | 'chatting' | 'disconnected';
+type ChatStatus = 'init' | 'waiting' | 'chatting' | 'disconnected' | 'skipped';
 
 enum MediaStatus {
   Pending = 'pending',
@@ -82,6 +82,18 @@ export default function ChatRoom() {
     }
   }, [mediaStatus]);
 
+  // Ensure remote video plays when stream is available
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteConnected && status === 'chatting') {
+      const video = remoteVideoRef.current;
+      if (video.srcObject && video.paused) {
+        video.play().catch((err) => {
+          console.error('Error playing remote video in useEffect:', err);
+        });
+      }
+    }
+  }, [remoteConnected, status]);
+
   // Socket.IO setup and WebRTC signaling
   useEffect(() => {
     const socket = io(SOCKET_URL ?? '', { transports: ['websocket'] });
@@ -108,6 +120,12 @@ export default function ChatRoom() {
       setRemoteConnected(false);
     });
 
+    socket.on('partnerSkipped', () => {
+      setStatus('skipped');
+      cleanUpPeer();
+      setRemoteConnected(false);
+    });
+
     socket.on('chatMessage', (msg: string) => {
       setMessages((m) => [...m, { from: 'them', text: msg }]);
       scrollMessages();
@@ -118,10 +136,18 @@ export default function ChatRoom() {
       await setupRTC(false); // Not initiator
       const pc = peerRef.current;
       if (!pc) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(desc));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit('rtc-answer', answer);
+      try {
+        await pc.setRemoteDescription(new RTCSessionDescription(desc));
+        const answer = await pc.createAnswer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true
+        });
+        await pc.setLocalDescription(answer);
+        socket.emit('rtc-answer', answer);
+        console.log('Sent WebRTC answer');
+      } catch (err) {
+        console.error('Error handling offer:', err);
+      }
     });
     socket.on('rtc-answer', async (desc: RTCSessionDescriptionInit) => {
       const pc = peerRef.current;
@@ -162,13 +188,24 @@ export default function ChatRoom() {
   }
 
   function handleNext() {
-    setMessages([]);
-    setStatus('waiting');
-    cleanUpPeer();
-    setRemoteConnected(false);
-    socketRef.current?.emit('next');
+    if (status === 'skipped' || status === 'disconnected') {
+      // Already disconnected, just find new partner
+      setStatus('waiting');
+      setMessages([]);
+      cleanUpPeer();
+      setRemoteConnected(false);
+      socketRef.current?.emit('findPartner');
+    } else {
+      // Currently chatting, skip current partner
+      setMessages([]);
+      setStatus('waiting');
+      cleanUpPeer();
+      setRemoteConnected(false);
+      socketRef.current?.emit('next');
+    }
   }
   function handleStop() {
+    socketRef.current?.emit('stop');
     socketRef.current?.disconnect();
     setStatus('init');
     setMessages([]);
@@ -184,17 +221,40 @@ export default function ChatRoom() {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     peerRef.current = pc;
 
-    // Stream local
-    localStreamRef.current?.getTracks().forEach((track) => {
-      pc.addTrack(track, localStreamRef.current!);
-    });
+    // Stream local - add all tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStreamRef.current!);
+        console.log('Added local track:', track.kind, track.enabled);
+      });
+    }
 
-    // Remote incoming track
+    // Remote incoming track - handle multiple tracks properly
     pc.ontrack = (event) => {
-      console.log('Received remote track:', event.track.kind);
+      console.log('Received remote track:', event.track.kind, event.streams.length);
       setRemoteConnected(true);
-      if (remoteVideoRef.current && event.streams && event.streams[0]) {
-        remoteVideoRef.current.srcObject = event.streams[0];
+      
+      // Get the first stream or create a new one from tracks
+      let remoteStream: MediaStream | null = null;
+      if (event.streams && event.streams.length > 0) {
+        remoteStream = event.streams[0];
+      } else if (event.track) {
+        // Fallback: create stream from track
+        remoteStream = new MediaStream([event.track]);
+      }
+
+      if (remoteStream && remoteVideoRef.current) {
+        // If there's already a stream, add the new track to it
+        if (remoteVideoRef.current.srcObject) {
+          const existingStream = remoteVideoRef.current.srcObject as MediaStream;
+          if (event.track && !existingStream.getTracks().includes(event.track)) {
+            existingStream.addTrack(event.track);
+          }
+        } else {
+          remoteVideoRef.current.srcObject = remoteStream;
+        }
+        
+        // Ensure video plays
         remoteVideoRef.current.play().catch((err) => {
           console.error('Error playing remote video:', err);
         });
@@ -210,19 +270,32 @@ export default function ChatRoom() {
     // Connection state logging for debugging
     pc.onconnectionstatechange = () => {
       console.log('Peer connection state:', pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        console.log('Peer connection established!');
+      }
     };
     pc.oniceconnectionstatechange = () => {
       console.log('ICE connection state:', pc.iceConnectionState);
-      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setRemoteConnected(true);
+      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
         setRemoteConnected(false);
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       }
     };
 
     if (initiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socketRef.current?.emit('rtc-offer', offer);
+      try {
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true
+        });
+        await pc.setLocalDescription(offer);
+        socketRef.current?.emit('rtc-offer', offer);
+        console.log('Sent WebRTC offer');
+      } catch (err) {
+        console.error('Error creating offer:', err);
+      }
     }
   }
 
@@ -249,6 +322,7 @@ export default function ChatRoom() {
   if (mediaStatus === MediaStatus.Denied) info = 'Camera/mic blocked — video chat will not work.';
   else if (status === 'waiting') info = 'Looking for a partner...';
   else if (status === 'chatting') info = remoteConnected ? 'Video connected!' : 'Connecting videos...';
+  else if (status === 'skipped') info = 'User has skipped you. Click Next to find someone else.';
   else if (status === 'disconnected') info = 'Partner disconnected. Click Next to find someone else.';
   else info = 'Ready to start anonymous chat.';
 
@@ -290,9 +364,17 @@ export default function ChatRoom() {
                     remoteVideoRef.current.play().catch(console.error);
                   }
                 }}
+                onCanPlay={() => {
+                  console.log('Remote video can play');
+                  if (remoteVideoRef.current) {
+                    remoteVideoRef.current.play().catch(console.error);
+                  }
+                }}
               />
             ) : status === 'chatting' && !remoteConnected ? (
               <span className="text-zinc-500">Connecting...</span>
+            ) : status === 'skipped' ? (
+              <span className="text-red-400">User skipped</span>
             ) : (
               <span className="text-zinc-500">Stranger video</span>
             )}
@@ -302,6 +384,12 @@ export default function ChatRoom() {
         {status === 'chatting' && (
           <div className="text-zinc-100 text-center bg-indigo-800/20 border border-indigo-600 rounded p-2 mb-3 font-semibold">
             You are connected with a stranger.
+          </div>
+        )}
+        {/* Skipped statement */}
+        {status === 'skipped' && (
+          <div className="text-red-300 text-center bg-red-900/20 border border-red-600 rounded p-2 mb-3 font-semibold">
+            User has skipped you.
           </div>
         )}
         {/* Text chat area */}
